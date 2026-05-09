@@ -1,158 +1,233 @@
+```html
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Quét QR SV7</title>
+
+  <!-- Thư viện nội bộ (đặt file html5-qrcode.min.js cùng thư mục) -->
   <script src="./html5-qrcode.min.js"></script>
+
   <style>
-    body{font-family:Arial; padding:16px; background:#f5f7fb}
-    .card{max-width:420px;margin:0 auto;background:#fff;padding:14px;border-radius:8px}
-    #reader{width:100%;height:320px;background:#000;border-radius:6px;display:none}
-    #result{margin-top:12px;padding:10px;border-radius:6px}
-    .success{background:#e6f4ea;color:#0b6b2f}
-    .error{background:#fdecea;color:#7a1b1b}
+    body{font-family:Arial, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding:16px; background:#f5f7fb; margin:0}
+    .card{max-width:480px;margin:18px auto;background:#fff;padding:16px;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,0.06)}
+    h1{font-size:1.1rem;margin:0 0 10px}
+    .row{display:flex;gap:8px;align-items:center;margin-top:10px}
+    input[type="time"]{padding:6px 8px;border-radius:6px;border:1px solid #d0d7de}
+    button{padding:10px 14px;border-radius:8px;border:none;background:#0b5ed7;color:#fff;font-weight:700;cursor:pointer}
+    button.secondary{background:#6c757d}
+    #reader-container{margin-top:12px;border-radius:8px;overflow:hidden;display:none}
+    #reader{width:100%;height:360px;background:#000;display:flex;align-items:center;justify-content:center}
+    #result{margin-top:12px;padding:10px;border-radius:8px;min-height:48px;font-weight:600;display:block}
+    .success{background:#e6f4ea;color:#0b6b2f;border:1px solid #cfead1}
+    .error{background:#fdecea;color:#7a1b1b;border:1px solid #f5c6c6}
+    .hint{font-size:13px;color:#666;margin-top:8px}
   </style>
 </head>
 <body>
   <div class="card">
-    <h3>Máy quét - Chi bộ SV7</h3>
-    Giờ bắt đầu: <input id="startTime" type="time" value="18:00">
-    <div style="margin-top:10px">
-      <button id="startBtn">Bật camera</button>
-      <button id="stopBtn" style="display:none">Dừng</button>
+    <h1>MÁY QUÉT - CHI BỘ SV7</h1>
+
+    <div class="row">
+      <label for="startTime">Giờ bắt đầu:</label>
+      <input id="startTime" type="time" value="18:00">
     </div>
-    <div id="reader"></div>
+
+    <div class="row" style="margin-top:12px">
+      <button id="startBtn">Bật camera</button>
+      <button id="stopBtn" class="secondary" style="display:none">Dừng</button>
+    </div>
+
+    <div id="reader-container">
+      <div id="reader"></div>
+    </div>
+
     <div id="result">Sẵn sàng quét.</div>
+    <div class="hint">Nếu không quét được trên điện thoại, mở trang bằng Chrome/Safari (không mở trong Facebook/Zalo).</div>
   </div>
 
   <script>
+    // Thay bằng URL exec của Apps Script (GET)
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxy_yZgeheWco_ADm8QkKOlFVPHFj4H6do0SZf86w6C3kqN1voIvIMokk4qvAY6zAKq/exec";
+
+    // UI elements
     const resultDiv = document.getElementById('result');
-    const reader = document.getElementById('reader');
+    const readerContainer = document.getElementById('reader-container');
+    const readerEl = document.getElementById('reader');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
-    let html5Qr = null;
-    let last = "";
 
+    // Sounds & vibration
+    const soundSuccess = new Audio('https://actions.google.com/sounds/v1/communication/flick_scuff.ogg');
+    const soundError = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+
+    // Scanner instance and state
+    let html5Qr = null;
+    let lastScanned = "";
+    let scanQueue = [];
+    let isUploading = false;
+    let resetTimer = null;
+
+    // Helpers
     function setResult(text, cls) {
       resultDiv.className = cls || "";
       resultDiv.innerText = text;
     }
 
     function sendGet(mssv, startTime) {
-      // Gọi GET để tránh preflight
       const url = APPS_SCRIPT_URL + '?mssv=' + encodeURIComponent(mssv) + '&startTime=' + encodeURIComponent(startTime);
       return fetch(url).then(r => r.json()).catch(e => ({status:"error", message: e.message || String(e)}));
     }
 
-    function onScanSuccess(decodedText) {
-      if (!decodedText) return;
-      if (decodedText === last) return;
-      last = decodedText;
-      const startTime = document.getElementById('startTime').value || "";
-      setResult("Đã nhận mã: " + decodedText, "success");
-      sendGet(decodedText, startTime).then(resp => {
-        if (resp && resp.status === "ok") setResult(resp.message, "success");
-        else setResult(resp.message || "Lỗi server", "error");
-        setTimeout(()=> setResult("Sẵn sàng quét."), 1500);
-      });
-      setTimeout(()=> last = "", 2500);
+    // Queue processor
+    async function processQueue() {
+      if (scanQueue.length === 0 || isUploading) return;
+      isUploading = true;
+      const task = scanQueue.shift();
+
+      try {
+        const resp = await sendGet(task.mssv, task.startTime);
+        if (resp && resp.status === "ok") {
+          // success: keep success message briefly
+          setResult(resp.message, "success");
+          try { soundSuccess.play().catch(()=>{}); } catch(e){}
+        } else {
+          setResult(resp.message || "Lỗi server", "error");
+          try { soundError.play().catch(()=>{}); } catch(e){}
+          // giữ thông báo lỗi 3.5s
+          clearTimeout(resetTimer);
+          resetTimer = setTimeout(() => {
+            if (scanQueue.length === 0) setResult("Sẵn sàng quét.");
+          }, 3500);
+        }
+      } catch (e) {
+        setResult("Lỗi kết nối: " + (e.message || e), "error");
+        try { soundError.play().catch(()=>{}); } catch(e){}
+      } finally {
+        isUploading = false;
+        // nếu không có lỗi hiển thị, reset về sẵn sàng sau 1.5s
+        if (resultDiv.className !== "error") {
+          clearTimeout(resetTimer);
+          resetTimer = setTimeout(() => setResult("Sẵn sàng quét."), 1500);
+        }
+        // tiếp tục xử lý queue
+        setTimeout(processQueue, 200);
+      }
     }
 
-    async function startCamera() {
+    // Scan success callback
+    function onScanSuccess(decodedText) {
+      if (!decodedText) return;
+      if (decodedText === lastScanned) return; // chống quét trùng
+      lastScanned = decodedText;
+
+      const startTime = document.getElementById('startTime').value || "";
+      // immediate feedback
+      setResult("Đã nhận mã: " + decodedText, "success");
+      try { soundSuccess.play().catch(()=>{}); } catch(e){}
+      if (navigator.vibrate) navigator.vibrate(100);
+
+      // push to queue
+      scanQueue.push({ mssv: decodedText, startTime: startTime });
+      processQueue();
+
+      // unlock after 2.5s
+      setTimeout(() => { lastScanned = ""; }, 2500);
+    }
+
+    // Start scanner: choose back camera if possible, use qrbox 250x250, fps 30, aspectRatio 1.0
+    async function startScanner() {
       if (typeof Html5Qrcode === "undefined") {
         setResult("Lỗi: thư viện html5-qrcode chưa nạp.", "error");
         return;
       }
-    
+
       startBtn.style.display = 'none';
       stopBtn.style.display = 'inline-block';
-      reader.style.display = 'block';
+      readerContainer.style.display = 'block';
       setResult("Đang xin quyền camera...");
-    
+
       try {
-        // Nếu đã lưu deviceId trước đó, dùng luôn
-        const savedDeviceId = localStorage.getItem('preferredCameraDeviceId');
-    
-        // Test quyền nhanh (yêu cầu để enumerateDevices trả label)
-        await navigator.mediaDevices.getUserMedia({ video: true }).then(s => s.getTracks().forEach(t => t.stop()));
-    
-        // Liệt kê thiết bị
+        // test permission so enumerateDevices returns labels
+        const testStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        testStream.getTracks().forEach(t => t.stop());
+
+        // enumerate devices and pick back camera if available
         const devices = await navigator.mediaDevices.enumerateDevices();
         const videoInputs = devices.filter(d => d.kind === 'videoinput');
-    
-        // Chọn deviceId ưu tiên: saved -> label chứa back/rear/environment -> first
         let chosenDeviceId = null;
-        if (savedDeviceId) {
-          // kiểm tra savedDeviceId còn tồn tại trong danh sách
-          if (videoInputs.some(d => d.deviceId === savedDeviceId)) {
-            chosenDeviceId = savedDeviceId;
-          } else {
-            // xóa nếu không còn hợp lệ
-            localStorage.removeItem('preferredCameraDeviceId');
+        for (const d of videoInputs) {
+          const lbl = (d.label || "").toLowerCase();
+          if (lbl.includes('back') || lbl.includes('rear') || lbl.includes('environment')) {
+            chosenDeviceId = d.deviceId;
+            break;
           }
         }
-    
-        if (!chosenDeviceId && videoInputs.length) {
-          for (const d of videoInputs) {
-            const lbl = (d.label || "").toLowerCase();
-            if (lbl.includes('back') || lbl.includes('rear') || lbl.includes('environment')) {
-              chosenDeviceId = d.deviceId;
-              break;
-            }
-          }
-          if (!chosenDeviceId) chosenDeviceId = videoInputs[0].deviceId;
-        }
-    
-        // Khởi Html5Qrcode với deviceId nếu có, ngược lại dùng facingMode
+        if (!chosenDeviceId && videoInputs.length) chosenDeviceId = videoInputs[0].deviceId;
+
+        // config matching your preferred settings
+        const config = { fps: 30, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0, disableFlip: false };
+
+        // create instance and start
         html5Qr = new Html5Qrcode("reader");
-        const config = { fps: 20, qrbox: { width: 250, height: 250 }, disableFlip: false };
-    
+
         if (chosenDeviceId) {
-          // Lưu deviceId làm mặc định cho lần sau
-          try { localStorage.setItem('preferredCameraDeviceId', chosenDeviceId); } catch(e){/* ignore */ }
-    
           await html5Qr.start(
             { deviceId: { exact: chosenDeviceId } },
             config,
-            (decodedText) => onScanSuccess(decodedText),
-            (err) => {}
+            (decodedText, decodedResult) => onScanSuccess(decodedText),
+            (errorMessage) => { /* per-frame decode errors ignored */ }
           );
         } else {
-          // fallback: facingMode
           await html5Qr.start(
             { facingMode: "environment" },
             config,
-            (decodedText) => onScanSuccess(decodedText),
-            (err) => {}
+            (decodedText, decodedResult) => onScanSuccess(decodedText),
+            (errorMessage) => { /* ignore */ }
           );
         }
-    
+
         setResult("Sẵn sàng quét.");
       } catch (err) {
-        console.error("Camera error:", err);
+        console.error("startScanner error:", err);
         setResult("Không thể truy cập camera: " + (err.message || err.name), "error");
         startBtn.style.display = 'inline-block';
         stopBtn.style.display = 'none';
-        reader.style.display = 'none';
+        readerContainer.style.display = 'none';
       }
     }
 
-
-    function stopCamera() {
-      if (!html5Qr) { setResult("Camera chưa chạy."); return; }
-      html5Qr.stop().then(()=> {
-        html5Qr.clear(); html5Qr = null;
-        reader.style.display = 'none';
+    // Stop scanner
+    function stopScanner() {
+      if (!html5Qr) {
+        setResult("Camera chưa chạy.");
+        return;
+      }
+      html5Qr.stop().then(() => {
+        html5Qr.clear();
+        html5Qr = null;
+        readerContainer.style.display = 'none';
         startBtn.style.display = 'inline-block';
         stopBtn.style.display = 'none';
         setResult("Đã dừng camera.");
-      }).catch(e => { console.error(e); setResult("Lỗi khi dừng camera", "error"); });
+      }).catch(err => {
+        console.error("stopScanner error:", err);
+        setResult("Lỗi khi dừng camera: " + (err.message || err.name), "error");
+      });
     }
 
-    startBtn.addEventListener('click', startCamera);
-    stopBtn.addEventListener('click', stopCamera);
+    // Attach events
+    startBtn.addEventListener('click', startScanner);
+    stopBtn.addEventListener('click', stopScanner);
+
+    // Optional: try to pre-check library on load
+    window.addEventListener('load', () => {
+      if (typeof Html5Qrcode === "undefined") {
+        setResult("Thư viện chưa nạp. Kiểm tra file html5-qrcode.min.js trên server.", "error");
+      }
+    });
   </script>
 </body>
 </html>
+```
