@@ -205,14 +205,47 @@
       processQueue();
     }
 
-    async function tryStartWithConstraints(constraints, config) {
+    async function tryStartWithCameraSource(cameraSource, config) {
       html5Qr = new Html5Qrcode("reader", { verbose: false });
       await html5Qr.start(
-        constraints,
+        cameraSource,
         config,
         onScanSuccess,
         () => {}
       );
+    }
+
+    async function buildCameraAttempts() {
+      const attempts = [
+        // html5-qrcode expects cameraIdOrConfig to be a string cameraId
+        // or a MediaTrackConstraints object. Do NOT pass boolean true/false.
+        { label: "Camera sau bằng facingMode exact", source: { facingMode: { exact: "environment" } } },
+        { label: "Camera sau bằng facingMode", source: { facingMode: "environment" } }
+      ];
+
+      try {
+        const cameras = await Html5Qrcode.getCameras();
+        if (Array.isArray(cameras) && cameras.length > 0) {
+          const backCamera = cameras.find(c => {
+            const label = String(c.label || "").toLowerCase();
+            return label.includes("back") || label.includes("rear") || label.includes("environment") || label.includes("sau");
+          });
+
+          if (backCamera && backCamera.id) {
+            attempts.push({ label: "Camera sau bằng deviceId", source: backCamera.id });
+          }
+
+          for (const cam of cameras) {
+            if (cam && cam.id && (!backCamera || cam.id !== backCamera.id)) {
+              attempts.push({ label: "Camera khác bằng deviceId", source: cam.id });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("Cannot enumerate cameras, will use facingMode only", e);
+      }
+
+      return attempts;
     }
 
     async function startScanner() {
@@ -235,18 +268,13 @@
         disableFlip: false
       };
 
-      const attempts = [
-        { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-        { width: { ideal: 1280 }, height: { ideal: 720 } },
-        true
-      ];
-
+      const attempts = await buildCameraAttempts();
       let lastErr = null;
 
-      for (const constraints of attempts) {
+      for (const attempt of attempts) {
         try {
-          await tryStartWithConstraints(constraints, config);
+          console.log("Trying camera:", attempt.label, attempt.source);
+          await tryStartWithCameraSource(attempt.source, config);
           setResult("Sẵn sàng quét.");
           startBtn.disabled = false;
           stopBtn.disabled = false;
@@ -254,6 +282,7 @@
           return;
         } catch (err) {
           lastErr = err;
+          console.warn("Camera attempt failed:", attempt.label, err);
           try {
             if (html5Qr) {
               await html5Qr.clear();
