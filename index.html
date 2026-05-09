@@ -62,35 +62,83 @@
 
     async function startCamera() {
       if (typeof Html5Qrcode === "undefined") {
-        setResult("Lỗi: thư viện html5-qrcode chưa nạp", "error");
+        setResult("Lỗi: thư viện html5-qrcode chưa nạp.", "error");
         return;
       }
+    
       startBtn.style.display = 'none';
       stopBtn.style.display = 'inline-block';
       reader.style.display = 'block';
       setResult("Đang xin quyền camera...");
+    
       try {
-        const test = await navigator.mediaDevices.getUserMedia({video:true});
-        test.getTracks().forEach(t=>t.stop());
+        // Nếu đã lưu deviceId trước đó, dùng luôn
+        const savedDeviceId = localStorage.getItem('preferredCameraDeviceId');
+    
+        // Test quyền nhanh (yêu cầu để enumerateDevices trả label)
+        await navigator.mediaDevices.getUserMedia({ video: true }).then(s => s.getTracks().forEach(t => t.stop()));
+    
+        // Liệt kê thiết bị
         const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoInputs = devices.filter(d=>d.kind==='videoinput');
-        let deviceId = videoInputs.length ? videoInputs[0].deviceId : null;
+        const videoInputs = devices.filter(d => d.kind === 'videoinput');
+    
+        // Chọn deviceId ưu tiên: saved -> label chứa back/rear/environment -> first
+        let chosenDeviceId = null;
+        if (savedDeviceId) {
+          // kiểm tra savedDeviceId còn tồn tại trong danh sách
+          if (videoInputs.some(d => d.deviceId === savedDeviceId)) {
+            chosenDeviceId = savedDeviceId;
+          } else {
+            // xóa nếu không còn hợp lệ
+            localStorage.removeItem('preferredCameraDeviceId');
+          }
+        }
+    
+        if (!chosenDeviceId && videoInputs.length) {
+          for (const d of videoInputs) {
+            const lbl = (d.label || "").toLowerCase();
+            if (lbl.includes('back') || lbl.includes('rear') || lbl.includes('environment')) {
+              chosenDeviceId = d.deviceId;
+              break;
+            }
+          }
+          if (!chosenDeviceId) chosenDeviceId = videoInputs[0].deviceId;
+        }
+    
+        // Khởi Html5Qrcode với deviceId nếu có, ngược lại dùng facingMode
         html5Qr = new Html5Qrcode("reader");
-        await html5Qr.start(
-          deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" },
-          { fps: 20, qrbox: { width: 250, height: 250 } },
-          (decodedText) => onScanSuccess(decodedText),
-          (err) => {}
-        );
+        const config = { fps: 20, qrbox: { width: 250, height: 250 }, disableFlip: false };
+    
+        if (chosenDeviceId) {
+          // Lưu deviceId làm mặc định cho lần sau
+          try { localStorage.setItem('preferredCameraDeviceId', chosenDeviceId); } catch(e){/* ignore */ }
+    
+          await html5Qr.start(
+            { deviceId: { exact: chosenDeviceId } },
+            config,
+            (decodedText) => onScanSuccess(decodedText),
+            (err) => {}
+          );
+        } else {
+          // fallback: facingMode
+          await html5Qr.start(
+            { facingMode: "environment" },
+            config,
+            (decodedText) => onScanSuccess(decodedText),
+            (err) => {}
+          );
+        }
+    
         setResult("Sẵn sàng quét.");
       } catch (err) {
-        console.error(err);
+        console.error("Camera error:", err);
         setResult("Không thể truy cập camera: " + (err.message || err.name), "error");
         startBtn.style.display = 'inline-block';
         stopBtn.style.display = 'none';
         reader.style.display = 'none';
       }
     }
+
 
     function stopCamera() {
       if (!html5Qr) { setResult("Camera chưa chạy."); return; }
