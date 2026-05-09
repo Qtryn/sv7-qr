@@ -2,15 +2,16 @@
 <html lang="vi">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>Quét QR SV7</title>
 
-  <!-- Thư viện html5-qrcode (file html5-qrcode.min.js phải nằm cùng thư mục) -->
-  <script src="./html5-qrcode.min.js"></script>
+  <!-- Dùng CDN để chạy ổn trên GitHub Pages.
+       Không cần đặt html5-qrcode.min.js cùng thư mục nữa. -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 
   <style>
     :root{--primary:#0b5ed7;--muted:#666}
-    body{font-family:system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin:0; padding:16px; background:#f5f7fb; color:#111}
+    body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial;margin:0;padding:16px;background:#f5f7fb;color:#111}
     .card{max-width:520px;margin:18px auto;background:#fff;padding:16px;border-radius:12px;box-shadow:0 8px 28px rgba(12,20,30,0.06)}
     h1{margin:0 0 8px;font-size:1.05rem}
     .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
@@ -18,13 +19,14 @@
     input[type="time"]{padding:6px 8px;border-radius:6px;border:1px solid #d0d7de}
     button{padding:10px 14px;border-radius:8px;border:none;background:var(--primary);color:#fff;font-weight:700;cursor:pointer}
     button.secondary{background:#6c757d}
+    button:disabled{opacity:.65;cursor:not-allowed}
     #reader-container{margin-top:12px;border-radius:10px;overflow:hidden;display:none;border:1px solid #e6e9ee}
-    #reader{width:100%;height:360px;background:#000;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
-    #reader video{width:100%;height:100%;object-fit:cover;display:block}
-    #result{margin-top:12px;padding:10px;border-radius:8px;min-height:48px;font-weight:600}
+    #reader{width:100%;min-height:360px;background:#000;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+    #reader video{width:100%!important;height:100%!important;object-fit:cover;display:block}
+    #result{margin-top:12px;padding:10px;border-radius:8px;min-height:48px;font-weight:600;white-space:pre-line}
     .success{background:#e6f4ea;color:#0b6b2f;border:1px solid #cfead1}
     .error{background:#fdecea;color:#7a1b1b;border:1px solid #f5c6cb}
-    .hint{font-size:13px;color:var(--muted);margin-top:8px}
+    .hint{font-size:13px;color:var(--muted);margin-top:8px;line-height:1.45}
     #zoom-controls{margin-top:10px;display:none;align-items:center;gap:8px}
     #zoomRange{width:160px}
     .small{font-size:13px;color:var(--muted)}
@@ -56,19 +58,20 @@
     </div>
 
     <div id="result">Sẵn sàng quét.</div>
-    <div class="hint">Mở trang bằng Chrome/Safari trên điện thoại (không mở trong Facebook/Zalo). Kéo slider để phóng to nếu QR nhỏ.</div>
+    <div class="hint">
+      Nên mở bằng Chrome/Safari trực tiếp từ GitHub Pages dạng <b>https://username.github.io/...</b>.
+      Không mở từ trang repo GitHub, file local, Facebook/Zalo browser. Camera chỉ chạy trong secure context HTTPS hoặc localhost.
+    </div>
 
     <ul id="history"></ul>
   </div>
 
   <script>
-    // Thay bằng URL exec của Apps Script (GET)
+    // URL exec của Google Apps Script
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxy_yZgeheWco_ADm8QkKOlFVPHFj4H6do0SZf86w6C3kqN1voIvIMokk4qvAY6zAKq/exec";
 
-    // UI
     const resultDiv = document.getElementById('result');
     const readerContainer = document.getElementById('reader-container');
-    const readerEl = document.getElementById('reader');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const zoomControls = document.getElementById('zoom-controls');
@@ -76,35 +79,84 @@
     const zoomReset = document.getElementById('zoomReset');
     const historyList = document.getElementById('history');
 
-    // Sounds
     const soundSuccess = new Audio('https://actions.google.com/sounds/v1/communication/flick_scuff.ogg');
     const soundError = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
 
-    // State
     let html5Qr = null;
     let lastScanned = "";
     let scanQueue = [];
     let isUploading = false;
     let resetTimer = null;
 
-    // Zoom control state
     let _videoTrack = null;
     let _videoEl = null;
     let supportsZoom = false;
-    let zoomCap = { min: 1, max: 1, step: 0.1 };
 
-    // Helpers
     function setResult(text, cls) {
       resultDiv.className = cls || "";
       resultDiv.innerText = text;
     }
 
-    function sendGet(mssv, startTime) {
-      const url = APPS_SCRIPT_URL + '?mssv=' + encodeURIComponent(mssv) + '&startTime=' + encodeURIComponent(startTime);
-      return fetch(url).then(r => r.json()).catch(e => ({status:"error", message: e.message || String(e)}));
+    function appendHistory(text) {
+      const li = document.createElement('li');
+      li.textContent = `${new Date().toLocaleTimeString()} — ${text}`;
+      historyList.prepend(li);
     }
 
-    // Queue processor
+    function explainCameraError(err) {
+      const name = err && err.name ? err.name : "";
+      const msg = err && err.message ? err.message : String(err || "");
+
+      if (!window.isSecureContext) {
+        return "Không thể truy cập camera vì trang chưa chạy bằng HTTPS.\nHãy mở bằng GitHub Pages: https://username.github.io/tên-repo/";
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        return "Trình duyệt không hỗ trợ camera API. Hãy dùng Chrome/Edge/Safari bản mới, không dùng trình duyệt trong Zalo/Facebook.";
+      }
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        return "Bạn đã chặn quyền camera. Hãy bấm biểu tượng ổ khóa trên thanh địa chỉ → Site settings → Camera → Allow, rồi reload trang.";
+      }
+      if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+        return "Không tìm thấy camera trên thiết bị.";
+      }
+      if (name === "NotReadableError" || name === "TrackStartError") {
+        return "Camera đang bị app khác dùng hoặc trình duyệt không mở được camera. Hãy tắt app camera/Meet/Zoom rồi thử lại.";
+      }
+      if (name === "OverconstrainedError" || name === "ConstraintNotSatisfiedError") {
+        return "Camera không đáp ứng cấu hình yêu cầu. Đã thử fallback nhưng vẫn lỗi: " + msg;
+      }
+      if (name === "SecurityError") {
+        return "Trình duyệt chặn camera vì lý do bảo mật. Hãy mở trang bằng HTTPS trực tiếp, không mở trong iframe/app chat.";
+      }
+      return "Không thể truy cập camera: " + (msg || name || "unknown error");
+    }
+
+    function browserPrecheck() {
+      if (typeof Html5Qrcode === "undefined") {
+        setResult("Lỗi: thư viện html5-qrcode chưa nạp. Kiểm tra kết nối mạng hoặc CDN bị chặn.", "error");
+        return false;
+      }
+      if (!window.isSecureContext) {
+        setResult("Camera bị chặn vì trang không chạy trong HTTPS/localhost.\nHãy deploy bằng GitHub Pages và mở URL https://username.github.io/...", "error");
+        return false;
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setResult("Trình duyệt không hỗ trợ camera API. Hãy dùng Chrome/Edge/Safari bản mới.", "error");
+        return false;
+      }
+      return true;
+    }
+
+    async function sendGet(mssv, startTime) {
+      const url = APPS_SCRIPT_URL + '?mssv=' + encodeURIComponent(mssv) + '&startTime=' + encodeURIComponent(startTime);
+      try {
+        const r = await fetch(url, { method: "GET", cache: "no-store" });
+        return await r.json();
+      } catch (e) {
+        return { status: "error", message: e.message || String(e) };
+      }
+    }
+
     async function processQueue() {
       if (scanQueue.length === 0 || isUploading) return;
       isUploading = true;
@@ -114,166 +166,145 @@
         const resp = await sendGet(task.mssv, task.startTime);
         if (resp && resp.status === "ok") {
           setResult(resp.message, "success");
-          try { soundSuccess.play().catch(()=>{}); } catch(e){}
+          soundSuccess.play().catch(()=>{});
           appendHistory(resp.message);
         } else {
-          setResult(resp.message || "Lỗi server", "error");
-          try { soundError.play().catch(()=>{}); } catch(e){}
+          setResult((resp && resp.message) || "Lỗi server", "error");
+          soundError.play().catch(()=>{});
           appendHistory((resp && resp.message) || ("Lỗi: " + task.mssv));
-          clearTimeout(resetTimer);
-          resetTimer = setTimeout(() => {
-            if (scanQueue.length === 0) setResult("Sẵn sàng quét.");
-          }, 3500);
         }
       } catch (e) {
         setResult("Lỗi kết nối: " + (e.message || e), "error");
-        try { soundError.play().catch(()=>{}); } catch(e){}
+        soundError.play().catch(()=>{});
         appendHistory("Lỗi kết nối: " + (e.message || e));
       } finally {
         isUploading = false;
-        if (resultDiv.className !== "error") {
-          clearTimeout(resetTimer);
-          resetTimer = setTimeout(() => setResult("Sẵn sàng quét."), 1500);
-        }
+        clearTimeout(resetTimer);
+        resetTimer = setTimeout(() => {
+          if (scanQueue.length === 0) setResult("Sẵn sàng quét.");
+        }, resultDiv.className === "error" ? 3500 : 1500);
+
         setTimeout(processQueue, 200);
       }
     }
 
-    // Append to history (most recent on top)
-    function appendHistory(text) {
-      const li = document.createElement('li');
-      li.textContent = `${new Date().toLocaleTimeString()} — ${text}`;
-      historyList.prepend(li);
-    }
-
-    // Scan success callback
     function onScanSuccess(decodedText) {
-      if (!decodedText) return;
-      if (decodedText === lastScanned) return;
-      lastScanned = decodedText;
+      const text = String(decodedText || "").trim();
+      if (!text) return;
+      if (text === lastScanned) return;
+
+      lastScanned = text;
+      setTimeout(() => { lastScanned = ""; }, 2500);
 
       const startTime = document.getElementById('startTime').value || "";
-      setResult("Đã nhận mã: " + decodedText, "success");
-      try { soundSuccess.play().catch(()=>{}); } catch(e){}
+      setResult("Đã nhận mã: " + text, "success");
+      soundSuccess.play().catch(()=>{});
       if (navigator.vibrate) navigator.vibrate(100);
 
-      scanQueue.push({ mssv: decodedText, startTime: startTime });
+      scanQueue.push({ mssv: text, startTime });
       processQueue();
-
-      setTimeout(() => { lastScanned = ""; }, 2500);
     }
 
-    // Start scanner: choose back camera if possible, use qrbox 320x320, fps 30, aspectRatio 1.0
-    async function startScanner() {
-      if (typeof Html5Qrcode === "undefined") {
-        setResult("Lỗi: thư viện html5-qrcode chưa nạp.", "error");
-        return;
-      }
+    async function tryStartWithConstraints(constraints, config) {
+      html5Qr = new Html5Qrcode("reader", { verbose: false });
+      await html5Qr.start(
+        constraints,
+        config,
+        onScanSuccess,
+        () => {}
+      );
+    }
 
+    async function startScanner() {
+      if (!browserPrecheck()) return;
+
+      startBtn.disabled = true;
+      stopBtn.disabled = true;
       startBtn.style.display = 'none';
       stopBtn.style.display = 'inline-block';
       readerContainer.style.display = 'block';
       setResult("Đang xin quyền camera...");
 
-      try {
-        // xin quyền để enumerateDevices trả label
-        const testStream = await navigator.mediaDevices.getUserMedia({ video: true });
-        testStream.getTracks().forEach(t => t.stop());
+      const config = {
+        fps: 10,
+        qrbox: function(viewfinderWidth, viewfinderHeight) {
+          const size = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.75);
+          return { width: Math.max(220, Math.min(size, 320)), height: Math.max(220, Math.min(size, 320)) };
+        },
+        aspectRatio: 1.0,
+        disableFlip: false
+      };
 
-        // enumerate devices and pick back camera if available
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoInputs = devices.filter(d => d.kind === 'videoinput');
-        let chosenDeviceId = null;
-        for (const d of videoInputs) {
-          const lbl = (d.label || "").toLowerCase();
-          if (lbl.includes('back') || lbl.includes('rear') || lbl.includes('environment')) {
-            chosenDeviceId = d.deviceId;
-            break;
-          }
-        }
-        if (!chosenDeviceId && videoInputs.length) chosenDeviceId = videoInputs[0].deviceId;
+      const attempts = [
+        { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+        { width: { ideal: 1280 }, height: { ideal: 720 } },
+        true
+      ];
 
-        // config matching preferred settings
-        const config = { fps: 30, qrbox: { width: 320, height: 320 }, aspectRatio: 1.0, disableFlip: false };
+      let lastErr = null;
 
-        // create instance and start
-        html5Qr = new Html5Qrcode("reader");
-
-        // request higher resolution to improve clarity
-        const cameraConstraints = chosenDeviceId
-          ? { deviceId: { exact: chosenDeviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-          : { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } };
-
-        await html5Qr.start(
-          cameraConstraints,
-          config,
-          (decodedText, decodedResult) => onScanSuccess(decodedText),
-          (errorMessage) => { /* ignore per-frame decode errors */ }
-        );
-
-        setResult("Sẵn sàng quét.");
-        // enable zoom controls after a short delay so video element exists
-        setTimeout(() => enableZoomControls(), 250);
-
-        // try to set focus/zoom hardware if available
-        setTimeout(async () => {
-          const videoEl = document.querySelector('#reader video');
-          if (videoEl && videoEl.srcObject) {
-            const track = videoEl.srcObject.getVideoTracks()[0];
-            if (track) {
-              try {
-                const caps = track.getCapabilities ? track.getCapabilities() : {};
-                if (caps.focusMode && caps.focusMode.includes('continuous')) {
-                  await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
-                }
-                if (typeof caps.zoom !== 'undefined') {
-                  const z = Math.min(2, caps.zoom.max || 2);
-                  await track.applyConstraints({ advanced: [{ zoom: z }] });
-                }
-              } catch (e) {
-                console.warn('applyConstraints not supported or failed', e);
-              }
+      for (const constraints of attempts) {
+        try {
+          await tryStartWithConstraints(constraints, config);
+          setResult("Sẵn sàng quét.");
+          startBtn.disabled = false;
+          stopBtn.disabled = false;
+          setTimeout(enableZoomControls, 300);
+          return;
+        } catch (err) {
+          lastErr = err;
+          try {
+            if (html5Qr) {
+              await html5Qr.clear();
             }
-          }
-        }, 600);
-
-      } catch (err) {
-        console.error("startScanner error:", err);
-        setResult("Không thể truy cập camera: " + (err.message || err.name), "error");
-        startBtn.style.display = 'inline-block';
-        stopBtn.style.display = 'none';
-        readerContainer.style.display = 'none';
+          } catch (_) {}
+          html5Qr = null;
+        }
       }
+
+      console.error("startScanner error:", lastErr);
+      setResult(explainCameraError(lastErr), "error");
+      readerContainer.style.display = 'none';
+      startBtn.style.display = 'inline-block';
+      stopBtn.style.display = 'none';
+      startBtn.disabled = false;
+      stopBtn.disabled = false;
     }
 
-    // Stop scanner
-    function stopScanner() {
+    async function stopScanner() {
       if (!html5Qr) {
         setResult("Camera chưa chạy.");
         return;
       }
-      html5Qr.stop().then(() => {
-        html5Qr.clear();
+
+      stopBtn.disabled = true;
+
+      try {
+        await html5Qr.stop();
+        await html5Qr.clear();
         html5Qr = null;
+
         readerContainer.style.display = 'none';
         startBtn.style.display = 'inline-block';
         stopBtn.style.display = 'none';
-        setResult("Đã dừng camera.");
-        // hide zoom controls and reset
+        startBtn.disabled = false;
+        stopBtn.disabled = false;
+
         zoomControls.style.display = 'none';
         applyCssZoom(1);
-        if (_videoTrack && supportsZoom && _videoTrack.applyConstraints) {
-          try { _videoTrack.applyConstraints({ advanced: [{ zoom: 1 }] }).catch(()=>{}); } catch(e){}
-        }
         _videoTrack = null;
         _videoEl = null;
-      }).catch(err => {
+        supportsZoom = false;
+
+        setResult("Đã dừng camera.");
+      } catch (err) {
         console.error("stopScanner error:", err);
-        setResult("Lỗi khi dừng camera: " + (err.message || err.name), "error");
-      });
+        stopBtn.disabled = false;
+        setResult("Lỗi khi dừng camera: " + (err.message || err.name || err), "error");
+      }
     }
 
-    // Zoom helpers
     function applyCssZoom(z) {
       if (!_videoEl) return;
       _videoEl.style.transform = `scale(${z})`;
@@ -283,25 +314,21 @@
     async function enableZoomControls() {
       zoomControls.style.display = 'flex';
       _videoEl = document.querySelector('#reader video');
-      if (!_videoEl) {
-        console.warn('Video element not found for zoom.');
-        return;
-      }
+      if (!_videoEl) return;
+
       const stream = _videoEl.srcObject;
       if (!stream) return;
+
       _videoTrack = stream.getVideoTracks()[0];
 
       try {
-        const caps = _videoTrack.getCapabilities ? _videoTrack.getCapabilities() : {};
+        const caps = _videoTrack && _videoTrack.getCapabilities ? _videoTrack.getCapabilities() : {};
         if (caps && typeof caps.zoom !== 'undefined') {
           supportsZoom = true;
-          zoomCap.min = caps.zoom.min || 1;
-          zoomCap.max = caps.zoom.max || 3;
-          zoomCap.step = caps.zoom.step || 0.1;
-          zoomRange.min = zoomCap.min;
-          zoomRange.max = zoomCap.max;
-          zoomRange.step = zoomCap.step;
-          zoomRange.value = zoomCap.min;
+          zoomRange.min = caps.zoom.min || 1;
+          zoomRange.max = caps.zoom.max || 3;
+          zoomRange.step = caps.zoom.step || 0.1;
+          zoomRange.value = caps.zoom.min || 1;
         } else {
           supportsZoom = false;
           zoomRange.min = 1;
@@ -309,7 +336,11 @@
           zoomRange.step = 0.05;
           zoomRange.value = 1;
         }
-      } catch (e) {
+
+        if (caps.focusMode && caps.focusMode.includes('continuous')) {
+          await _videoTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(()=>{});
+        }
+      } catch (_) {
         supportsZoom = false;
         zoomRange.min = 1;
         zoomRange.max = 3;
@@ -323,9 +354,7 @@
           try {
             await _videoTrack.applyConstraints({ advanced: [{ zoom: z }] });
             _videoEl.style.transform = '';
-            _videoEl.style.transformOrigin = '';
-          } catch (err) {
-            console.warn('applyConstraints zoom failed, fallback to CSS', err);
+          } catch (_) {
             applyCssZoom(z);
           }
         } else {
@@ -342,15 +371,11 @@
       };
     }
 
-    // Attach events
     startBtn.addEventListener('click', startScanner);
     stopBtn.addEventListener('click', stopScanner);
 
-    // Pre-check library
     window.addEventListener('load', () => {
-      if (typeof Html5Qrcode === "undefined") {
-        setResult("Thư viện chưa nạp. Kiểm tra file html5-qrcode.min.js trên server.", "error");
-      }
+      browserPrecheck();
     });
   </script>
 </body>
