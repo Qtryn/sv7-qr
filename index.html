@@ -1,28 +1,34 @@
 ```html
 <!doctype html>
-<html>
+<html lang="vi">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Quét QR SV7</title>
 
-  <!-- Thư viện nội bộ (đặt file html5-qrcode.min.js cùng thư mục) -->
+  <!-- Thư viện html5-qrcode (file html5-qrcode.min.js phải nằm cùng thư mục) -->
   <script src="./html5-qrcode.min.js"></script>
 
   <style>
-    body{font-family:Arial, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding:16px; background:#f5f7fb; margin:0}
-    .card{max-width:480px;margin:18px auto;background:#fff;padding:16px;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,0.06)}
-    h1{font-size:1.1rem;margin:0 0 10px}
-    .row{display:flex;gap:8px;align-items:center;margin-top:10px}
+    :root{--primary:#0b5ed7;--muted:#666}
+    body{font-family:system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin:0; padding:16px; background:#f5f7fb; color:#111}
+    .card{max-width:520px;margin:18px auto;background:#fff;padding:16px;border-radius:12px;box-shadow:0 8px 28px rgba(12,20,30,0.06)}
+    h1{margin:0 0 8px;font-size:1.05rem}
+    .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+    label{font-weight:600}
     input[type="time"]{padding:6px 8px;border-radius:6px;border:1px solid #d0d7de}
-    button{padding:10px 14px;border-radius:8px;border:none;background:#0b5ed7;color:#fff;font-weight:700;cursor:pointer}
+    button{padding:10px 14px;border-radius:8px;border:none;background:var(--primary);color:#fff;font-weight:700;cursor:pointer}
     button.secondary{background:#6c757d}
-    #reader-container{margin-top:12px;border-radius:8px;overflow:hidden;display:none}
-    #reader{width:100%;height:360px;background:#000;display:flex;align-items:center;justify-content:center}
-    #result{margin-top:12px;padding:10px;border-radius:8px;min-height:48px;font-weight:600;display:block}
+    #reader-container{margin-top:12px;border-radius:10px;overflow:hidden;display:none;border:1px solid #e6e9ee}
+    #reader{width:100%;height:360px;background:#000;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+    #reader video{width:100%;height:100%;object-fit:cover;display:block}
+    #result{margin-top:12px;padding:10px;border-radius:8px;min-height:48px;font-weight:600}
     .success{background:#e6f4ea;color:#0b6b2f;border:1px solid #cfead1}
-    .error{background:#fdecea;color:#7a1b1b;border:1px solid #f5c6c6}
-    .hint{font-size:13px;color:#666;margin-top:8px}
+    .error{background:#fdecea;color:#7a1b1b;border:1px solid #f5c6cb}
+    .hint{font-size:13px;color:var(--muted);margin-top:8px}
+    #zoom-controls{margin-top:10px;display:none;align-items:center;gap:8px}
+    #zoomRange{width:160px}
+    .small{font-size:13px;color:var(--muted)}
   </style>
 </head>
 <body>
@@ -34,9 +40,14 @@
       <input id="startTime" type="time" value="18:00">
     </div>
 
-    <div class="row" style="margin-top:12px">
+    <div class="row">
       <button id="startBtn">Bật camera</button>
       <button id="stopBtn" class="secondary" style="display:none">Dừng</button>
+      <div id="zoom-controls">
+        <label class="small" for="zoomRange">Zoom</label>
+        <input id="zoomRange" type="range" min="1" max="3" step="0.05" value="1">
+        <button id="zoomReset" class="secondary" style="padding:8px 10px">Reset</button>
+      </div>
     </div>
 
     <div id="reader-container">
@@ -44,30 +55,39 @@
     </div>
 
     <div id="result">Sẵn sàng quét.</div>
-    <div class="hint">Nếu không quét được trên điện thoại, mở trang bằng Chrome/Safari (không mở trong Facebook/Zalo).</div>
+    <div class="hint">Mở trang bằng Chrome/Safari trên điện thoại (không mở trong Facebook/Zalo). Kéo slider để phóng to nếu QR nhỏ.</div>
   </div>
 
   <script>
     // Thay bằng URL exec của Apps Script (GET)
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxy_yZgeheWco_ADm8QkKOlFVPHFj4H6do0SZf86w6C3kqN1voIvIMokk4qvAY6zAKq/exec";
 
-    // UI elements
+    // UI
     const resultDiv = document.getElementById('result');
     const readerContainer = document.getElementById('reader-container');
     const readerEl = document.getElementById('reader');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
+    const zoomControls = document.getElementById('zoom-controls');
+    const zoomRange = document.getElementById('zoomRange');
+    const zoomReset = document.getElementById('zoomReset');
 
-    // Sounds & vibration
+    // Sounds
     const soundSuccess = new Audio('https://actions.google.com/sounds/v1/communication/flick_scuff.ogg');
     const soundError = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
 
-    // Scanner instance and state
+    // State
     let html5Qr = null;
     let lastScanned = "";
     let scanQueue = [];
     let isUploading = false;
     let resetTimer = null;
+
+    // Zoom control state
+    let _videoTrack = null;
+    let _videoEl = null;
+    let supportsZoom = false;
+    let zoomCap = { min: 1, max: 1, step: 0.1 };
 
     // Helpers
     function setResult(text, cls) {
@@ -89,13 +109,11 @@
       try {
         const resp = await sendGet(task.mssv, task.startTime);
         if (resp && resp.status === "ok") {
-          // success: keep success message briefly
           setResult(resp.message, "success");
           try { soundSuccess.play().catch(()=>{}); } catch(e){}
         } else {
           setResult(resp.message || "Lỗi server", "error");
           try { soundError.play().catch(()=>{}); } catch(e){}
-          // giữ thông báo lỗi 3.5s
           clearTimeout(resetTimer);
           resetTimer = setTimeout(() => {
             if (scanQueue.length === 0) setResult("Sẵn sàng quét.");
@@ -106,12 +124,10 @@
         try { soundError.play().catch(()=>{}); } catch(e){}
       } finally {
         isUploading = false;
-        // nếu không có lỗi hiển thị, reset về sẵn sàng sau 1.5s
         if (resultDiv.className !== "error") {
           clearTimeout(resetTimer);
           resetTimer = setTimeout(() => setResult("Sẵn sàng quét."), 1500);
         }
-        // tiếp tục xử lý queue
         setTimeout(processQueue, 200);
       }
     }
@@ -119,20 +135,17 @@
     // Scan success callback
     function onScanSuccess(decodedText) {
       if (!decodedText) return;
-      if (decodedText === lastScanned) return; // chống quét trùng
+      if (decodedText === lastScanned) return;
       lastScanned = decodedText;
 
       const startTime = document.getElementById('startTime').value || "";
-      // immediate feedback
       setResult("Đã nhận mã: " + decodedText, "success");
       try { soundSuccess.play().catch(()=>{}); } catch(e){}
       if (navigator.vibrate) navigator.vibrate(100);
 
-      // push to queue
       scanQueue.push({ mssv: decodedText, startTime: startTime });
       processQueue();
 
-      // unlock after 2.5s
       setTimeout(() => { lastScanned = ""; }, 2500);
     }
 
@@ -166,7 +179,7 @@
         }
         if (!chosenDeviceId && videoInputs.length) chosenDeviceId = videoInputs[0].deviceId;
 
-        // config matching your preferred settings
+        // config matching preferred settings
         const config = { fps: 30, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0, disableFlip: false };
 
         // create instance and start
@@ -177,7 +190,7 @@
             { deviceId: { exact: chosenDeviceId } },
             config,
             (decodedText, decodedResult) => onScanSuccess(decodedText),
-            (errorMessage) => { /* per-frame decode errors ignored */ }
+            (errorMessage) => { /* ignore per-frame decode errors */ }
           );
         } else {
           await html5Qr.start(
@@ -189,6 +202,8 @@
         }
 
         setResult("Sẵn sàng quét.");
+        // enable zoom controls after a short delay so video element exists
+        setTimeout(() => enableZoomControls(), 250);
       } catch (err) {
         console.error("startScanner error:", err);
         setResult("Không thể truy cập camera: " + (err.message || err.name), "error");
@@ -211,17 +226,94 @@
         startBtn.style.display = 'inline-block';
         stopBtn.style.display = 'none';
         setResult("Đã dừng camera.");
+        // hide zoom controls and reset
+        zoomControls.style.display = 'none';
+        applyCssZoom(1);
+        if (_videoTrack && supportsZoom && _videoTrack.applyConstraints) {
+          try { _videoTrack.applyConstraints({ advanced: [{ zoom: 1 }] }).catch(()=>{}); } catch(e){}
+        }
+        _videoTrack = null;
+        _videoEl = null;
       }).catch(err => {
         console.error("stopScanner error:", err);
         setResult("Lỗi khi dừng camera: " + (err.message || err.name), "error");
       });
     }
 
+    // Zoom helpers
+    function applyCssZoom(z) {
+      if (!_videoEl) return;
+      _videoEl.style.transform = `scale(${z})`;
+      _videoEl.style.transformOrigin = 'center center';
+    }
+
+    async function enableZoomControls() {
+      zoomControls.style.display = 'flex';
+      _videoEl = document.querySelector('#reader video');
+      if (!_videoEl) {
+        console.warn('Video element not found for zoom.');
+        return;
+      }
+      const stream = _videoEl.srcObject;
+      if (!stream) return;
+      _videoTrack = stream.getVideoTracks()[0];
+
+      try {
+        const caps = _videoTrack.getCapabilities ? _videoTrack.getCapabilities() : {};
+        if (caps && typeof caps.zoom !== 'undefined') {
+          supportsZoom = true;
+          zoomCap.min = caps.zoom.min || 1;
+          zoomCap.max = caps.zoom.max || 3;
+          zoomCap.step = caps.zoom.step || 0.1;
+          zoomRange.min = zoomCap.min;
+          zoomRange.max = zoomCap.max;
+          zoomRange.step = zoomCap.step;
+          zoomRange.value = zoomCap.min;
+        } else {
+          supportsZoom = false;
+          zoomRange.min = 1;
+          zoomRange.max = 3;
+          zoomRange.step = 0.05;
+          zoomRange.value = 1;
+        }
+      } catch (e) {
+        supportsZoom = false;
+        zoomRange.min = 1;
+        zoomRange.max = 3;
+        zoomRange.step = 0.05;
+        zoomRange.value = 1;
+      }
+
+      zoomRange.oninput = async function() {
+        const z = parseFloat(this.value);
+        if (supportsZoom && _videoTrack && _videoTrack.applyConstraints) {
+          try {
+            await _videoTrack.applyConstraints({ advanced: [{ zoom: z }] });
+            _videoEl.style.transform = '';
+            _videoEl.style.transformOrigin = '';
+          } catch (err) {
+            console.warn('applyConstraints zoom failed, fallback to CSS', err);
+            applyCssZoom(z);
+          }
+        } else {
+          applyCssZoom(z);
+        }
+      };
+
+      zoomReset.onclick = function() {
+        zoomRange.value = 1;
+        if (supportsZoom && _videoTrack && _videoTrack.applyConstraints) {
+          _videoTrack.applyConstraints({ advanced: [{ zoom: 1 }] }).catch(()=>{});
+        }
+        applyCssZoom(1);
+      };
+    }
+
     // Attach events
     startBtn.addEventListener('click', startScanner);
     stopBtn.addEventListener('click', stopScanner);
 
-    // Optional: try to pre-check library on load
+    // Pre-check library
     window.addEventListener('load', () => {
       if (typeof Html5Qrcode === "undefined") {
         setResult("Thư viện chưa nạp. Kiểm tra file html5-qrcode.min.js trên server.", "error");
