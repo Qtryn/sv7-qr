@@ -28,6 +28,8 @@
     #zoom-controls{margin-top:10px;display:none;align-items:center;gap:8px}
     #zoomRange{width:160px}
     .small{font-size:13px;color:var(--muted)}
+    ul#history{margin-top:12px;padding-left:18px;max-height:160px;overflow:auto;border-top:1px dashed #eee;padding-top:8px}
+    ul#history li{margin-bottom:6px;font-size:14px}
   </style>
 </head>
 <body>
@@ -55,6 +57,8 @@
 
     <div id="result">Sẵn sàng quét.</div>
     <div class="hint">Mở trang bằng Chrome/Safari trên điện thoại (không mở trong Facebook/Zalo). Kéo slider để phóng to nếu QR nhỏ.</div>
+
+    <ul id="history"></ul>
   </div>
 
   <script>
@@ -70,6 +74,7 @@
     const zoomControls = document.getElementById('zoom-controls');
     const zoomRange = document.getElementById('zoomRange');
     const zoomReset = document.getElementById('zoomReset');
+    const historyList = document.getElementById('history');
 
     // Sounds
     const soundSuccess = new Audio('https://actions.google.com/sounds/v1/communication/flick_scuff.ogg');
@@ -110,9 +115,11 @@
         if (resp && resp.status === "ok") {
           setResult(resp.message, "success");
           try { soundSuccess.play().catch(()=>{}); } catch(e){}
+          appendHistory(resp.message);
         } else {
           setResult(resp.message || "Lỗi server", "error");
           try { soundError.play().catch(()=>{}); } catch(e){}
+          appendHistory((resp && resp.message) || ("Lỗi: " + task.mssv));
           clearTimeout(resetTimer);
           resetTimer = setTimeout(() => {
             if (scanQueue.length === 0) setResult("Sẵn sàng quét.");
@@ -121,6 +128,7 @@
       } catch (e) {
         setResult("Lỗi kết nối: " + (e.message || e), "error");
         try { soundError.play().catch(()=>{}); } catch(e){}
+        appendHistory("Lỗi kết nối: " + (e.message || e));
       } finally {
         isUploading = false;
         if (resultDiv.className !== "error") {
@@ -129,6 +137,13 @@
         }
         setTimeout(processQueue, 200);
       }
+    }
+
+    // Append to history (most recent on top)
+    function appendHistory(text) {
+      const li = document.createElement('li');
+      li.textContent = `${new Date().toLocaleTimeString()} — ${text}`;
+      historyList.prepend(li);
     }
 
     // Scan success callback
@@ -148,7 +163,7 @@
       setTimeout(() => { lastScanned = ""; }, 2500);
     }
 
-    // Start scanner: choose back camera if possible, use qrbox 250x250, fps 30, aspectRatio 1.0
+    // Start scanner: choose back camera if possible, use qrbox 320x320, fps 30, aspectRatio 1.0
     async function startScanner() {
       if (typeof Html5Qrcode === "undefined") {
         setResult("Lỗi: thư viện html5-qrcode chưa nạp.", "error");
@@ -161,7 +176,7 @@
       setResult("Đang xin quyền camera...");
 
       try {
-        // test permission so enumerateDevices returns labels
+        // xin quyền để enumerateDevices trả label
         const testStream = await navigator.mediaDevices.getUserMedia({ video: true });
         testStream.getTracks().forEach(t => t.stop());
 
@@ -179,30 +194,49 @@
         if (!chosenDeviceId && videoInputs.length) chosenDeviceId = videoInputs[0].deviceId;
 
         // config matching preferred settings
-        const config = { fps: 30, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0, disableFlip: false };
+        const config = { fps: 30, qrbox: { width: 320, height: 320 }, aspectRatio: 1.0, disableFlip: false };
 
         // create instance and start
         html5Qr = new Html5Qrcode("reader");
 
-        if (chosenDeviceId) {
-          await html5Qr.start(
-            { deviceId: { exact: chosenDeviceId } },
-            config,
-            (decodedText, decodedResult) => onScanSuccess(decodedText),
-            (errorMessage) => { /* ignore per-frame decode errors */ }
-          );
-        } else {
-          await html5Qr.start(
-            { facingMode: "environment" },
-            config,
-            (decodedText, decodedResult) => onScanSuccess(decodedText),
-            (errorMessage) => { /* ignore */ }
-          );
-        }
+        // request higher resolution to improve clarity
+        const cameraConstraints = chosenDeviceId
+          ? { deviceId: { exact: chosenDeviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+          : { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } };
+
+        await html5Qr.start(
+          cameraConstraints,
+          config,
+          (decodedText, decodedResult) => onScanSuccess(decodedText),
+          (errorMessage) => { /* ignore per-frame decode errors */ }
+        );
 
         setResult("Sẵn sàng quét.");
         // enable zoom controls after a short delay so video element exists
         setTimeout(() => enableZoomControls(), 250);
+
+        // try to set focus/zoom hardware if available
+        setTimeout(async () => {
+          const videoEl = document.querySelector('#reader video');
+          if (videoEl && videoEl.srcObject) {
+            const track = videoEl.srcObject.getVideoTracks()[0];
+            if (track) {
+              try {
+                const caps = track.getCapabilities ? track.getCapabilities() : {};
+                if (caps.focusMode && caps.focusMode.includes('continuous')) {
+                  await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+                }
+                if (typeof caps.zoom !== 'undefined') {
+                  const z = Math.min(2, caps.zoom.max || 2);
+                  await track.applyConstraints({ advanced: [{ zoom: z }] });
+                }
+              } catch (e) {
+                console.warn('applyConstraints not supported or failed', e);
+              }
+            }
+          }
+        }, 600);
+
       } catch (err) {
         console.error("startScanner error:", err);
         setResult("Không thể truy cập camera: " + (err.message || err.name), "error");
